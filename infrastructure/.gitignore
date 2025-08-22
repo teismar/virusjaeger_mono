@@ -1,0 +1,30 @@
+# Infrastructure specific ignores
+*.log
+.env
+.env.local
+.env.production
+
+# Docker Compose overrides
+docker-compose.override.yml
+docker-compose.prod.yml
+
+# Volume data (should be managed by Docker)
+data/
+logs/
+
+# Temporary files
+tmp/
+temp/
+
+# Custom rule files (users should add their own)
+yara-rules/*.yar
+!yara-rules/default.yar
+
+# Backup files
+*.bak
+*.backup
+*.orig
+
+# Test artifacts
+test-results/
+coverage/

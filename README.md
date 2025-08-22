@@ -20,15 +20,31 @@ Upload -> API stores metadata (Postgres) -> enqueues scan task (RabbitMQ) -> wor
 - Hash is primary key for idempotency & dedup.
 - Use S3 (MinIO) for file blobs; DB keeps metadata only.
 
-## Run (Dev PoC)
+## Run (Enhanced Infrastructure)
+
+### Quick Start
 ```bash
-# Start stack (first build)
+# Start complete infrastructure with all AV engines
 cd infrastructure
 docker compose up --build
-# API: http://localhost:8000/docs
+
+# Or use the management script
+./manage.sh start
+
+# API Documentation: http://localhost:8000/docs
 # Frontend: http://localhost:3000
+# RabbitMQ Management: http://localhost:15672 (guest/guest)
+# MinIO Console: http://localhost:9001 (minioadmin/minioadmin)
 ```
-Upload a file in UI, watch status poll until finished.
+
+### Multi-Engine Scanning
+The infrastructure now includes multiple antivirus engines:
+- **ClamAV**: Real-time virus signature scanning
+- **Yara**: Rule-based malware detection  
+- **Orchestrator**: Multi-engine coordination
+- **Simulated**: Development/testing scanner
+
+Upload a file and choose between single-engine or multi-engine scanning for comprehensive analysis.
 
 ## API (Enhanced v0.2.0)
 
@@ -45,6 +61,7 @@ Upload a file in UI, watch status poll until finished.
 - `POST /files/rescan` - Rescan existing files
 - `POST /urls` - Submit URLs for scanning and analysis
 - `POST /files/batch` - Batch upload multiple files (max 10)
+- `POST /files/multi-engine` - Upload files with comprehensive multi-engine scanning
 
 ### Features Added in v0.2.0
 - **API Key Authentication**: Bearer token auth for automation users
@@ -55,21 +72,39 @@ Upload a file in UI, watch status poll until finished.
 - **Mock Scanning**: Works without Celery for local development
 - **Comprehensive Documentation**: Auto-generated OpenAPI docs
 - **Rate Limiting**: File size limits and batch restrictions
+- **Multi-Engine Scanning**: ClamAV + Yara + simulation for comprehensive analysis
 
 ### Demo API Key
 Use `demo-api-key` as Bearer token for testing authenticated endpoints:
 ```bash
+# Submit URL for scanning
 curl -H "Authorization: Bearer demo-api-key" \
   -X POST "http://localhost:8000/urls?url=https://example.com"
+
+# Upload file with multi-engine scanning
+curl -H "Authorization: Bearer demo-api-key" \
+  -X POST "http://localhost:8000/files/multi-engine" \
+  -F "file=@sample.exe"
+
+# Upload file with multi-engine option (query parameter)  
+curl -X POST "http://localhost:8000/files?multi_engine=true" \
+  -F "file=@sample.exe"
 ```
 
 ## Next Steps / Ideas
-- Real ClamAV integration container & signature updates.
-- Additional workers: metadata extraction (PE headers, EXIF, strings), YARA / LiveHunt rules, sandbox detonation.
-- OpenSearch indexing + `/search` endpoint.
-- Auth (API keys), rate limiting, abuse prevention.
-- File type detection & pipeline branching.
-- Caching layer (Redis) for hot reports.
+
+### Completed in v0.3.0
+- ✅ Real ClamAV integration container & signature updates
+- ✅ Additional workers: YARA rule-based detection
+- ✅ Multi-engine scanning orchestration
+- ✅ Custom antivirus container infrastructure
+
+### Future Enhancements
+- Additional workers: metadata extraction (PE headers, EXIF, strings), sandbox detonation
+- OpenSearch indexing + `/search` endpoint
+- Enhanced auth (API keys), rate limiting, abuse prevention
+- File type detection & pipeline branching
+- Caching layer (Redis) for hot reports
 - Websocket or Server-Sent Events for push updates instead of polling.
 - Multi-engine scoring aggregation.
 - Tagging & retrohunt queries.

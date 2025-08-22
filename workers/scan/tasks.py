@@ -20,3 +20,8 @@ def scan_file(sha256: str):
                 await session.commit()
     asyncio.run(update())
     return result
+
+@celery_app.task(name='tasks.ping')
+def ping():
+    """Health check task for the simulated scanner"""
+    return {'status': 'healthy', 'engine': 'simulated'}
