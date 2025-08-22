@@ -4,7 +4,7 @@ except ImportError:  # fallback for pydantic v1
     from pydantic import BaseSettings  # type: ignore
 
 class Settings(BaseSettings):
-    postgres_dsn: str = "postgresql+asyncpg://virus:virus@postgres:5432/virus"
+    postgres_dsn: str = "sqlite+aiosqlite:///./virusjaeger.db"  # Use SQLite for local dev
     rabbitmq_url: str = "amqp://guest:guest@rabbitmq:5672//"
     opensearch_url: str = "http://opensearch:9200"
     s3_endpoint: str = "http://minio:9000"

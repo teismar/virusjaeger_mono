@@ -30,10 +30,38 @@ docker compose up --build
 ```
 Upload a file in UI, watch status poll until finished.
 
-## API (initial)
-- `POST /files` multipart file -> `{ sha256, status }`
-- `GET /files/{sha256}` -> report JSON
-- `GET /health` -> service health
+## API (Enhanced v0.2.0)
+
+### Public Endpoints (No authentication required)
+- `POST /files` - Upload files for malware scanning
+- `GET /files/{sha256}` - Get detailed scan reports
+- `GET /search` - Search by filename or hash (MD5/SHA1/SHA256)
+- `GET /health` - Service health check
+- `GET /statistics` - System statistics and engine info
+- `GET /urls/{scan_id}` - Get URL scan reports
+- `GET /api-info` - API documentation and usage guide
+
+### Authenticated Endpoints (Require Bearer token)
+- `POST /files/rescan` - Rescan existing files
+- `POST /urls` - Submit URLs for scanning and analysis
+- `POST /files/batch` - Batch upload multiple files (max 10)
+
+### Features Added in v0.2.0
+- **API Key Authentication**: Bearer token auth for automation users
+- **URL Scanning**: Submit and analyze suspicious URLs
+- **Batch Operations**: Upload multiple files simultaneously  
+- **Enhanced Search**: Search by filename or any hash type
+- **Statistics Dashboard**: Real-time system metrics
+- **Mock Scanning**: Works without Celery for local development
+- **Comprehensive Documentation**: Auto-generated OpenAPI docs
+- **Rate Limiting**: File size limits and batch restrictions
+
+### Demo API Key
+Use `demo-api-key` as Bearer token for testing authenticated endpoints:
+```bash
+curl -H "Authorization: Bearer demo-api-key" \
+  -X POST "http://localhost:8000/urls?url=https://example.com"
+```
 
 ## Next Steps / Ideas
 - Real ClamAV integration container & signature updates.

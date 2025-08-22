@@ -1,8 +1,10 @@
 fastapi
 uvicorn[standard]
 pydantic
+pydantic-settings
 SQLAlchemy
 asyncpg
+aiosqlite
 celery
 boto3
 opensearch-py
