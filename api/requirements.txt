@@ -10,3 +10,6 @@ boto3
 opensearch-py
 python-multipart
 aiofiles
+passlib[bcrypt]
+python-jose[cryptography]
+PyJWT
