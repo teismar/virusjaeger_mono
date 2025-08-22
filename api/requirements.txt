@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+pydantic
+SQLAlchemy
+asyncpg
+celery
+boto3
+opensearch-py
+python-multipart
+aiofiles
