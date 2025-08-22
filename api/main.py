@@ -1,13 +1,16 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends, Header
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends, Header, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from pydantic import BaseModel
 import aiofiles
 import os
 import random
 from typing import Optional, List
+from datetime import datetime, timedelta
 from common.hashing import compute_hashes
-from common.db import Base, engine, SessionLocal, Sample
-from sqlalchemy import select
+from common.db import Base, engine, SessionLocal, Sample, User, ApiKey
+from common.auth import verify_password, get_password_hash, create_access_token, verify_token, generate_api_key
+from sqlalchemy import select, update
 from common.config import settings
 # Make Celery optional for local development
 try:
@@ -16,10 +19,40 @@ try:
 except ImportError:
     CELERY_AVAILABLE = False
 
+# Pydantic models for request/response
+class UserCreate(BaseModel):
+    username: str
+    email: str
+    password: str
+
+class UserResponse(BaseModel):
+    id: int
+    username: str
+    email: str
+    is_admin: bool
+    is_active: bool
+    created_at: datetime
+    daily_quota: int
+    used_today: int
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class ApiKeyCreate(BaseModel):
+    name: str
+
+class ApiKeyResponse(BaseModel):
+    id: int
+    key: str
+    name: str
+    is_active: bool
+    created_at: datetime
+
 app = FastAPI(
     title="VirusJaeger API", 
-    version="0.2.0",
-    description="A self-hosted VirusTotal clone API for malware analysis",
+    version="0.3.0",
+    description="A self-hosted VirusTotal clone API for malware analysis with user authentication",
     contact={
         "name": "VirusJaeger API",
         "url": "https://github.com/teismar/virusjaeger_mono",
@@ -35,10 +68,237 @@ app.add_middleware(
     allow_headers=['*'],
 )
 
+# OAuth2 scheme for JWT tokens
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login", auto_error=False)
+
+async def get_current_user(token: str = Depends(oauth2_scheme)) -> Optional[User]:
+    """Get current user from JWT token."""
+    if not token:
+        return None
+    
+    payload = verify_token(token)
+    if not payload:
+        return None
+        
+    user_id = payload.get("sub")
+    if not user_id:
+        return None
+        
+    async with SessionLocal() as session:
+        stmt = select(User).where(User.id == int(user_id), User.is_active == True)
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
+async def get_current_admin_user(current_user: User = Depends(get_current_user)) -> User:
+    """Get current admin user."""
+    if not current_user or not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not enough permissions"
+        )
+    return current_user
+
+async def validate_api_key(authorization: Optional[str] = Header(None)) -> Optional[dict]:
+    """Validate API key from database."""
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+        
+    api_key = authorization[7:]  # Remove "Bearer " prefix
+    
+    async with SessionLocal() as session:
+        stmt = select(ApiKey, User).join(User, ApiKey.user_id == User.id).where(
+            ApiKey.key == api_key,
+            ApiKey.is_active == True,
+            User.is_active == True
+        )
+        result = await session.execute(stmt)
+        row = result.first()
+        
+        if not row:
+            return None
+            
+        api_key_obj, user = row
+        
+        # Update last used timestamp
+        stmt_update = update(ApiKey).where(ApiKey.id == api_key_obj.id).values(
+            last_used=datetime.utcnow()
+        )
+        await session.execute(stmt_update)
+        await session.commit()
+        
+        return {
+            "user_id": user.id,
+            "username": user.username,
+            "daily_quota": user.daily_quota,
+            "used_today": user.used_today,
+            "is_admin": user.is_admin
+        }
+
+async def create_default_admin():
+    """Create default admin user if none exists."""
+    async with SessionLocal() as session:
+        stmt = select(User).where(User.is_admin == True)
+        result = await session.execute(stmt)
+        admin_exists = result.first()
+        
+        if not admin_exists:
+            admin_user = User(
+                username="admin",
+                email="admin@virusjaeger.local",
+                password_hash=get_password_hash("admin123"),
+                is_admin=True,
+                daily_quota=10000
+            )
+            session.add(admin_user)
+            await session.commit()
+            
+            # Create API key for admin
+            api_key = ApiKey(
+                key="admin-" + generate_api_key(),
+                user_id=admin_user.id,
+                name="Default Admin Key"
+            )
+            session.add(api_key)
+            await session.commit()
+            print(f"Created default admin user with API key: {api_key.key}")
+
 @app.on_event("startup")
 async def startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await create_default_admin()
+
+# Authentication endpoints
+@app.post("/auth/register", response_model=UserResponse)
+async def register(user_data: UserCreate):
+    """Register a new user."""
+    async with SessionLocal() as session:
+        # Check if username or email already exists
+        stmt = select(User).where(
+            (User.username == user_data.username) | (User.email == user_data.email)
+        )
+        result = await session.execute(stmt)
+        existing_user = result.scalar_one_or_none()
+        
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Username or email already registered"
+            )
+        
+        # Create new user
+        user = User(
+            username=user_data.username,
+            email=user_data.email,
+            password_hash=get_password_hash(user_data.password)
+        )
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+        
+        return UserResponse(**user.__dict__)
+
+@app.post("/auth/login", response_model=Token)
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    """Login and get access token."""
+    async with SessionLocal() as session:
+        stmt = select(User).where(User.username == form_data.username, User.is_active == True)
+        result = await session.execute(stmt)
+        user = result.scalar_one_or_none()
+        
+        if not user or not verify_password(form_data.password, user.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        access_token = create_access_token(data={"sub": str(user.id)})
+        return {"access_token": access_token, "token_type": "bearer"}
+
+@app.get("/auth/me", response_model=UserResponse)
+async def get_current_user_info(current_user: User = Depends(get_current_user)):
+    """Get current user information."""
+    if not current_user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+    return UserResponse(**current_user.__dict__)
+
+@app.post("/auth/api-keys", response_model=ApiKeyResponse)
+async def create_api_key(
+    api_key_data: ApiKeyCreate,
+    current_user: User = Depends(get_current_user)
+):
+    """Create a new API key for the current user."""
+    if not current_user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+    
+    async with SessionLocal() as session:
+        api_key = ApiKey(
+            key=generate_api_key(),
+            user_id=current_user.id,
+            name=api_key_data.name
+        )
+        session.add(api_key)
+        await session.commit()
+        await session.refresh(api_key)
+        
+        return ApiKeyResponse(**api_key.__dict__)
+
+@app.get("/auth/api-keys", response_model=List[ApiKeyResponse])
+async def list_api_keys(current_user: User = Depends(get_current_user)):
+    """List API keys for the current user."""
+    if not current_user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+    
+    async with SessionLocal() as session:
+        stmt = select(ApiKey).where(ApiKey.user_id == current_user.id)
+        result = await session.execute(stmt)
+        api_keys = result.scalars().all()
+        
+        return [ApiKeyResponse(**key.__dict__) for key in api_keys]
+
+# Admin endpoints
+@app.get("/admin/users", response_model=List[UserResponse])
+async def list_users(admin_user: User = Depends(get_current_admin_user)):
+    """List all users (admin only)."""
+    async with SessionLocal() as session:
+        stmt = select(User)
+        result = await session.execute(stmt)
+        users = result.scalars().all()
+        
+        return [UserResponse(**user.__dict__) for user in users]
+
+@app.patch("/admin/users/{user_id}")
+async def update_user(
+    user_id: int,
+    is_admin: Optional[bool] = None,
+    is_active: Optional[bool] = None,
+    daily_quota: Optional[int] = None,
+    admin_user: User = Depends(get_current_admin_user)
+):
+    """Update user properties (admin only)."""
+    async with SessionLocal() as session:
+        stmt = select(User).where(User.id == user_id)
+        result = await session.execute(stmt)
+        user = result.scalar_one_or_none()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        updates = {}
+        if is_admin is not None:
+            updates["is_admin"] = is_admin
+        if is_active is not None:
+            updates["is_active"] = is_active
+        if daily_quota is not None:
+            updates["daily_quota"] = daily_quota
+            
+        if updates:
+            stmt_update = update(User).where(User.id == user_id).values(**updates)
+            await session.execute(stmt_update)
+            await session.commit()
+        
+        return {"message": "User updated successfully"}
 
 @app.get("/health")
 async def health():
@@ -154,17 +414,6 @@ async def _mock_scan_file(sha256: str):
             sample.scan_status = 'finished'
             sample.scan_result = result
             await session.commit()
-
-# Simple API key validation (in production, use proper authentication)
-api_keys = {"demo-api-key": {"name": "Demo User", "daily_quota": 1000, "used_today": 0}}
-
-async def validate_api_key(authorization: Optional[str] = Header(None)):
-    """Optional API key validation for automation endpoints"""
-    if authorization and authorization.startswith("Bearer "):
-        api_key = authorization[7:]  # Remove "Bearer " prefix
-        if api_key in api_keys:
-            return api_keys[api_key]
-    return None
 
 @app.get("/search")
 async def search(q: str = Query(..., min_length=3, max_length=64)):
