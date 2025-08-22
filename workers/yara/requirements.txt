@@ -1,0 +1,6 @@
+celery==5.3.6
+pydantic==1.10.15
+SQLAlchemy==2.0.30
+asyncpg==0.29.0
+yara-python==4.3.1
+python-magic==0.4.27

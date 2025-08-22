@@ -1,0 +1,140 @@
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: api/Dockerfile
+    depends_on:
+      - postgres
+      - rabbitmq
+    environment:
+      - PYTHONUNBUFFERED=1
+      - POSTGRES_DSN=postgresql+asyncpg://virus:virus@postgres:5432/virus
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672//
+    ports:
+      - "8000:8000"
+    volumes:
+      - file_storage:/app/storage
+      
+  frontend:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+      
+  # Original simulated scanner (kept for compatibility)
+  worker-scan:
+    build:
+      context: ..
+      dockerfile: workers/scan/Dockerfile
+    depends_on:
+      - rabbitmq
+      - postgres
+    environment:
+      - POSTGRES_DSN=postgresql+asyncpg://virus:virus@postgres:5432/virus
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672//
+    volumes:
+      - file_storage:/app/storage
+      
+  # ClamAV antivirus worker
+  worker-clamav:
+    build:
+      context: ..
+      dockerfile: workers/clamav/Dockerfile
+    depends_on:
+      - rabbitmq
+      - postgres
+    environment:
+      - POSTGRES_DSN=postgresql+asyncpg://virus:virus@postgres:5432/virus
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672//
+    volumes:
+      - file_storage:/app/storage
+      - clamav_db:/var/lib/clamav
+      
+  # Yara rule-based detection worker  
+  worker-yara:
+    build:
+      context: ..
+      dockerfile: workers/yara/Dockerfile
+    depends_on:
+      - rabbitmq
+      - postgres
+    environment:
+      - POSTGRES_DSN=postgresql+asyncpg://virus:virus@postgres:5432/virus
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672//
+    volumes:
+      - file_storage:/app/storage
+      - yara_rules:/app/yara-rules
+      
+  # Multi-engine scan orchestrator
+  worker-orchestrator:
+    build:
+      context: ..
+      dockerfile: workers/orchestrator/Dockerfile
+    depends_on:
+      - rabbitmq
+      - postgres
+      - worker-scan
+      - worker-clamav
+      - worker-yara
+    environment:
+      - POSTGRES_DSN=postgresql+asyncpg://virus:virus@postgres:5432/virus
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672//
+    volumes:
+      - file_storage:/app/storage
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: virus
+      POSTGRES_PASSWORD: virus
+      POSTGRES_DB: virus
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      
+  opensearch:
+    image: opensearchproject/opensearch:2.12.0
+    environment:
+      - discovery.type=single-node
+      - plugins.security.disabled=true
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=admin123
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+      
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
+  opensearch_data:
+  minio_data:
+  file_storage:
+  clamav_db:
+  yara_rules:

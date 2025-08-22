@@ -42,10 +42,24 @@ async def startup():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    health_status = {"status": "ok", "api": "healthy"}
+    
+    # Check scanning engines if Celery is available
+    if CELERY_AVAILABLE:
+        try:
+            # Check orchestrator health
+            task = celery_app.send_task('orchestrator.health_check', args=[])
+            engines_health = task.get(timeout=10)
+            health_status["engines"] = engines_health
+        except Exception as e:
+            health_status["engines"] = {"error": f"Could not check engines: {str(e)}"}
+    else:
+        health_status["engines"] = {"note": "Celery not available, using mock scanning"}
+    
+    return health_status
 
 @app.post("/files")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(file: UploadFile = File(...), multi_engine: bool = Query(False, description="Use multi-engine scanning (ClamAV + Yara + Simulated)")):
     # size limit
     contents = await file.read()
     if len(contents) > settings.max_file_size_mb * 1024 * 1024:
@@ -71,7 +85,12 @@ async def upload_file(file: UploadFile = File(...)):
     # Submit scan task (with fallback for local development)
     if CELERY_AVAILABLE:
         try:
-            celery_app.send_task('tasks.scan_file', args=[sha256_hex])
+            if multi_engine:
+                # Use orchestrator for multi-engine scanning
+                celery_app.send_task('orchestrator.scan_file', args=[sha256_hex, contents])
+            else:
+                # Use original single-engine scanning
+                celery_app.send_task('tasks.scan_file', args=[sha256_hex])
         except Exception:
             # Fallback to mock scanning for local development
             await _mock_scan_file(sha256_hex)
@@ -79,7 +98,8 @@ async def upload_file(file: UploadFile = File(...)):
         # Mock scanning when Celery is not available
         await _mock_scan_file(sha256_hex)
     
-    return {"sha256": sha256_hex, "status": "queued"}
+    scan_type = "multi-engine" if multi_engine else "single-engine"
+    return {"sha256": sha256_hex, "status": "queued", "scan_type": scan_type}
 
 @app.get("/files/{sha256}")
 async def get_report(sha256: str):
@@ -190,6 +210,63 @@ async def rescan_file(
             await _mock_scan_file(sha256)
         
         return {"sha256": sha256, "status": "queued", "message": "Rescan initiated"}
+
+@app.post("/files/multi-engine")
+async def upload_file_multi_engine(
+    file: UploadFile = File(...),
+    api_user: dict = Depends(validate_api_key)
+):
+    """Upload and scan file with multiple antivirus engines (requires API key)"""
+    if not api_user:
+        raise HTTPException(status_code=401, detail="API key required for multi-engine scanning")
+    
+    # size limit
+    contents = await file.read()
+    if len(contents) > settings.max_file_size_mb * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File too large")
+    
+    # compute hashes
+    import io
+    md5_hex, sha1_hex, sha256_hex = compute_hashes(io.BytesIO(contents))
+
+    async with SessionLocal() as session:
+        stmt = select(Sample).where(Sample.sha256 == sha256_hex)
+        res = await session.execute(stmt)
+        existing = res.scalar_one_or_none()
+        if existing:
+            # If file exists, trigger a fresh multi-engine scan
+            existing.scan_status = 'pending'
+            existing.scan_result = None
+            await session.commit()
+        else:
+            sample = Sample(sha256=sha256_hex, sha1=sha1_hex, md5=md5_hex, size=len(contents), filename=file.filename)
+            session.add(sample)
+            await session.commit()
+    
+    # Write to local temp (simulate object storage) for PoC
+    os.makedirs('/tmp/samples', exist_ok=True)
+    async with aiofiles.open(f"/tmp/samples/{sha256_hex}", 'wb') as f:
+        await f.write(contents)
+    
+    # Submit multi-engine scan task
+    if CELERY_AVAILABLE:
+        try:
+            # Use orchestrator for comprehensive multi-engine scanning
+            celery_app.send_task('orchestrator.scan_file', args=[sha256_hex, contents])
+        except Exception:
+            # Fallback to mock scanning for local development
+            await _mock_scan_file(sha256_hex)
+    else:
+        # Mock scanning when Celery is not available
+        await _mock_scan_file(sha256_hex)
+    
+    return {
+        "sha256": sha256_hex, 
+        "status": "queued", 
+        "scan_type": "multi-engine",
+        "engines": ["simulated", "clamav", "yara"],
+        "message": "File submitted for comprehensive multi-engine analysis"
+    }
 
 @app.post("/urls")
 async def scan_url(

@@ -1,8 +1,7 @@
-version: '3.9'
 services:
   api:
     build:
-      context: ..
+      context: .
       dockerfile: api/Dockerfile
     depends_on:
       - postgres
@@ -13,7 +12,7 @@ services:
       - "8000:8000"
   frontend:
     build:
-      context: ..
+      context: .
       dockerfile: frontend/Dockerfile
     ports:
       - "3000:80"
@@ -21,7 +20,7 @@ services:
       - api
   worker-scan:
     build:
-      context: ..
+      context: .
       dockerfile: workers/scan/Dockerfile
     depends_on:
       - rabbitmq
